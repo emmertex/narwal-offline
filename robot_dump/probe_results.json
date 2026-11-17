@@ -2910,5 +2910,131 @@
  {
   "path": "/userdata/logs/wireless_communicator/202611172324.1.communicator",
   "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/platform/conf/auth_config.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/robotdata/static/robot_info/private_key.pem",
+  "status": "hit",
+  "size": 1704,
+  "sha256": "6d8738beacd8dbf73f78cdd16aa849eeb77fb1bc27f1568b4be96db7cdf4c7e6",
+  "file": "robotdata_static_robot_info_private_key.pem"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/platform/conf/mqtt_config.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/platform/conf/tls_config.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/platform/conf/ca_config.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/platform/platform.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/usr/lib/libota-burnboot.so",
+  "status": "empty"
+ },
+ {
+  "path": "/etc/swupdate/swupdate.cfg",
+  "status": "empty"
+ },
+ {
+  "path": "/etc/swupdate.key",
+  "status": "empty"
+ },
+ {
+  "path": "/etc/swupdate.aes-key",
+  "status": "empty"
+ },
+ {
+  "path": "/etc/aes.key",
+  "status": "empty"
+ },
+ {
+  "path": "/etc/hwrevision",
+  "status": "empty"
+ },
+ {
+  "path": "/usr/bin/otad",
+  "status": "empty"
+ },
+ {
+  "path": "/usr/sbin/otad",
+  "status": "empty"
+ },
+ {
+  "path": "/usr/bin/ota_manager",
+  "status": "empty"
+ },
+ {
+  "path": "/usr/bin/swupdate_client",
+  "status": "empty"
+ },
+ {
+  "path": "/usr/bin/swupdate.sh",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/ota_manager",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/upgrade_manager",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/swupdate.sh",
+  "status": "empty"
+ },
+ {
+  "path": "/lib/libota-burnboot.so",
+  "status": "hit",
+  "size": 28152,
+  "sha256": "1f9a5762dc885443a2eeec86397fda5869e4da9cf994a8f4a2fe2c2568e1cde2",
+  "file": "lib_libota-burnboot.so"
+ },
+ {
+  "path": "/usr/lib/libota-burnboot.so.1",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/lib/libota-burnboot.so.1",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/platform/auth_config.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/robokit_platform/conf/AuthConfig.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/robokit_platform/auth_config.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/robokit_platform/conf/device_auth.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/robokit_platform/conf/ssl.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/robokit_platform/conf/itls_config.conf",
+  "status": "empty"
+ },
+ {
+  "path": "/oem/DISK/bin/pita/robokit_platform/conf/mqtt_auth.conf",
+  "status": "empty"
  }
 ]

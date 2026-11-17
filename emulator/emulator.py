@@ -82,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         w(f"POST {host}{path} body={body[:300]!r}")
         if path.endswith("/ota/check"):
-            self._json(NO_UPDATE)
+            self._ota_check()
         elif "/login" in path or "/token/refresh" in path:
             self._login()
         elif "getDeviceInfoList" in path:
@@ -103,14 +103,54 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         host = (self.headers.get("Host") or "").split(":")[0]
-        w(f"GET {host}{self.path}")
         path = self.path.split("?")[0]
+        w(f"GET {host}{self.path}")
+        if path.startswith("/fw/"):
+            self._serve_fw(path[4:])
+            return
         if "getDeviceInfoList" in path:
             self._devices()
         elif "/ota/check" in path:
-            self._json(NO_UPDATE)
+            self._ota_check()
         else:
             self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
+
+    # ------------------------------------------------------------ OTA oracle
+    def _ota_check(self):
+        """Serve /var/tmp/narwal_cap/ota_override.json if present, else no-update.
+
+        The override drives the robot's own genuine
+        download -> verify -> DECRYPT -> stage pipeline from our server.
+        """
+        ov = os.path.join(os.path.dirname(LOG), "ota_override.json")
+        try:
+            with open(ov) as f:
+                resp = json.load(f)
+            w(f"ota/check: serving override {ov}")
+            self._json(resp)
+        except Exception as e:
+            w(f"ota/check: no override ({e}); no-update")
+            self._json(NO_UPDATE)
+
+    def _serve_fw(self, name):
+        fw_dir = "/var/tmp/narwal_cap/fw"
+        safe = os.path.basename(name)
+        p = os.path.join(fw_dir, safe)
+        if not os.path.isfile(p):
+            self.send_error(404)
+            return
+        size = os.path.getsize(p)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        with open(p, "rb") as f:
+            while True:
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        w(f"fw served: {safe} ({size}B)")
 
     # ------------------------------------------------------------ payloads
     def _login(self):
