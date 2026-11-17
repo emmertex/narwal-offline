@@ -1,0 +1,11 @@
+# private key material — never commit
+pki/*.key
+pki/*.srl
+pki/leaves/
+tools/narwal_tokens.json
+*.bak
+
+# large build outputs — rebuild with apk/make-custom-apk.sh
+apk/*.apk
+apk/*.keystore
+__pycache__/
