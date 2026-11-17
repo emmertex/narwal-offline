@@ -9,3 +9,12 @@ tools/narwal_tokens.json
 apk/*.apk
 apk/*.keystore
 __pycache__/
+
+# robot file dumps (large binaries; manifest + README stay)
+robot_dump/*
+!robot_dump/README.md
+!robot_dump/probe_results.json
+!robot_dump/oem_inventory_paths.txt
+!robot_dump/etc_sysctl.conf.orig
+!robot_dump/experiments/
+!robot_dump/experiments/**

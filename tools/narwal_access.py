@@ -118,6 +118,26 @@ def fileinfo(name="", path="") -> bytes:
     inner = (enc_str(1, name) if name else b"") + (enc_str(2, path) if path else b"")
     return inner
 
+
+def strip_narwal_frame(raw: bytes) -> bytes:
+    """Drop the 0x01 + varint(len) + auth-protobuf header; return the message.
+
+    Responses on the response topic carry the same identity frame as
+    requests (0x01, varint length, then that many bytes of auth protobuf).
+    """
+    if len(raw) < 2 or raw[0] != 0x01:
+        return raw
+    length = shift = 0
+    pos = 1
+    while pos < len(raw):
+        byte = raw[pos]
+        pos += 1
+        length |= (byte & 0x7F) << shift
+        shift += 7
+        if not byte & 0x80:
+            break
+    return raw[pos + length:]
+
 REQ_LIST = b""  # GetConfigFileList_Request has zero fields
 REQ_GET = lambda name, path: enc_msg(1, fileinfo(name, path))
 REQ_SET = lambda name, path, content: enc_msg(1, fileinfo(name, path)) + enc_str(2, content)
@@ -194,24 +214,19 @@ class RobotLink:
     def _on_connect(self, c, u, f, rc, props=None):
         self.connected = True
 
-    def _on_msg(self, c, u, f, m):
-        # match by MQTT5 correlation data when present
+    def _on_msg(self, c, u, m):
+        # match ONLY by MQTT5 correlation data. Response topics are shared
+        # between concurrent app clients (the broker fan-outs to every
+        # subscriber), so fallback-to-first-pending cross-matches strangers.
         props = getattr(m, "properties", None)
         corr = getattr(props, "CorrelationData", None) if props else None
         if corr is not None and corr in self.pending:
             ev = self.pending.pop(corr)
-            self.pending[corr] = ev  # keep key; store payload
             self.pending[corr] = m.payload
             try:
                 ev.set()
             except Exception:
                 pass
-        else:
-            for k, v in list(self.pending.items()):
-                if hasattr(v, "set"):
-                    self.pending[k] = m.payload
-                    v.set()
-                    break
 
     def connect(self, timeout=20):
         self.cli.connect(self.broker, 8883, keepalive=30)
@@ -233,8 +248,9 @@ class RobotLink:
         props = mqtt.Properties(mqtt.PacketTypes.PUBLISH)
         props.ResponseTopic = resp_topic
         props.CorrelationData = corr
-        # Narwal frame: 0x01 varint(len) uuid uuid  (identity), then the message
-        frame = b"\x01" + _varint(len(self.uuid)) + self.uuid.encode() + self.uuid.encode()
+        # Narwal frame: 0x01 varint(len) {1: uuid, 2: uuid}  (identity), then the message
+        inner = enc_str(1, self.uuid) + enc_str(2, self.uuid)
+        frame = b"\x01" + _varint(len(inner)) + inner
         self.cli.publish(f"{self.base}/{command}", frame + body, qos=0, properties=props)
         ok = ev.wait(timeout)
         if ok:
@@ -254,9 +270,9 @@ class RobotLink:
         raw = self.request("dynamic_params/config_content/get", REQ_GET(name, path), timeout=timeout)
         if raw is None:
             return None
-        top = dec_fields(raw)
+        top = dec_fields(strip_narwal_frame(raw))
         content = top.get(2)
-        return content if content is not None else b""
+        return content if isinstance(content, bytes) else b""
 
     def write_file(self, path: str, content: bytes, timeout=60) -> str:
         name = os.path.basename(path)
@@ -264,7 +280,7 @@ class RobotLink:
                            REQ_SET(name, path, content), timeout=timeout)
         if raw is None:
             return "no answer"
-        top = dec_fields(raw)
+        top = dec_fields(strip_narwal_frame(raw))
         return (top.get(3) or b"").decode("utf-8", "replace") or str(top)
 
     def wake(self):
@@ -296,7 +312,7 @@ def flatten_list(raw: bytes) -> list[dict]:
                 if pth or nm:
                     files.append({"name": nm, "path": pth})
     try:
-        top = dec_fields(raw)
+        top = dec_fields(strip_narwal_frame(raw))
         res = top.get(1)
         if isinstance(res, bytes):
             for f, v in dec_fields(res).items():

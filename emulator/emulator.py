@@ -88,8 +88,16 @@ class Handler(BaseHTTPRequestHandler):
         elif "getDeviceInfoList" in path:
             self._devices()
         elif "device-bootstrap" in path or "bootstrap" in path:
+            # Sentinel experiment: if the robot honors a server-provided MQTT
+            # endpoint, we see bootstrap-sentinel… in DNS and (port 1883) a
+            # plaintext CONNECT attempt on the offline broker.
             self._json({"code": 0, "msg": "ok", "success": True,
-                        "result": {"mqtt": {"host": "us-01.mqtt.narwaltech.com", "port": 8883}}})
+                        "result": {"mqtt": {"host": "bootstrap-sentinel.narwal.offline",
+                                            "port": 1884},
+                                   "mqttHost": "bootstrap-sentinel.narwal.offline",
+                                   "mqttPort": 1883,
+                                   "broker": "bootstrap-sentinel.narwal.offline",
+                                   "endpoints": {"mqtt": "bootstrap-sentinel.narwal.offline:1884"}}})
         else:
             self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
 
@@ -107,18 +115,19 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------ payloads
     def _login(self):
         # Standard app keys + sentinel broker fields: we learn which key the
-        # ROBOT honors by watching DNS for sentinel-narwal-offline.test.
+        # ROBOT honors by watching DNS. login-sentinel… distinguishes the
+        # auth/login response from the bootstrap one.
         self._json({"code": 0, "msg": "ok", "success": True, "result": {
             "token": FAKE_JWT, "refresh_token": FAKE_REFRESH,
             "refreshToken": FAKE_REFRESH, "access_token": FAKE_JWT,
             "uuid": "offline-emulator-user",
-            "mqtt_host": "sentinel-narwal-offline.test",
-            "broker": "sentinel-narwal-offline.test",
-            "host": "sentinel-narwal-offline.test",
-            "mqtt": {"host": "sentinel-narwal-offline.test", "port": 8883},
-            "endpoints": {"mqtt": "sentinel-narwal-offline.test:8883"},
-            "server": "sentinel-narwal-offline.test",
-            "domain": "sentinel-narwal-offline.test"}})
+            "mqtt_host": "login-sentinel.narwal.offline",
+            "broker": "login-sentinel.narwal.offline",
+            "host": "login-sentinel.narwal.offline",
+            "mqtt": {"host": "login-sentinel.narwal.offline", "port": 1884},
+            "endpoints": {"mqtt": "login-sentinel.narwal.offline:1884"},
+            "server": "login-sentinel.narwal.offline",
+            "domain": "login-sentinel.narwal.offline"}})
 
     def _devices(self):
         self._json({"code": 0, "err_code": 10000, "msg": "ok", "result": {
@@ -157,6 +166,7 @@ class SNIServer(ThreadingHTTPServer):
     def _sni(self, sslobj, servername, ctx):
         import traceback
         try:
+            w(f"sni: {servername}")
             leaves = os.path.join(self.pki, "leaves")
             pem = os.path.join(leaves, f"{servername}.pem")
             key = os.path.join(leaves, f"{servername}.key")
@@ -164,6 +174,8 @@ class SNIServer(ThreadingHTTPServer):
                 new = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 new.load_cert_chain(pem, key)
                 sslobj.context = new
+            else:
+                w(f"sni: NO LEAF for {servername} (falls back to default)")
             return None
         except Exception:
             w("sni callback error:\n" + traceback.format_exc())
