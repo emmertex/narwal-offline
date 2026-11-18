@@ -111,6 +111,14 @@ PYEOF
 #    the phone needed).
 rm -rf base_decoded
 apktool d -f -s -o base_decoded base.apk >/dev/null
+# apktool decodes this one meta-data's android:resource="@null" literally,
+# and aapt2 can't re-encode "@null" as a resource reference on rebuild —
+# it silently drops the attribute, leaving a <meta-data> with neither
+# value nor resource, which fails to install at all
+# (INSTALL_PARSE_FAILED_MANIFEST_MALFORMED). It's just a Firebase push
+# notification icon override; dropping the tag is harmless here.
+sed -i '/android:name="com.google.firebase.messaging.default_notification_icon"/d' \
+  base_decoded/AndroidManifest.xml
 mkdir -p base_decoded/res/raw
 cp "$CA_CERT" base_decoded/res/raw/narwal_offline_ca.pem
 cat > base_decoded/res/xml/network_security_config.xml <<'EOF'
