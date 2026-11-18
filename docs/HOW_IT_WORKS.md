@@ -171,3 +171,52 @@ ABI split and a density split are present, not just the arm64 one.
 next to the arm64 split (unmodified content, just re-signed with the
 rest — every split in one install must share the same signing cert)
 and prints the full `adb install-multiple` line with all of them.
+
+### 7a. Flutter's own TLS stack (a second, separate trust store)
+
+Getting a clean install wasn't enough to log in. Dart's own networking
+(`dart:io`, used for every REST call) is a completely separate BoringSSL
+build baked into `libflutter.so` — it reads Android's **system** CA
+directory (`/system/etc/security/cacerts`) directly and never consults
+`network_security_config.xml` at all. That file only ever covered
+Android's own Java-level stack (OkHttp, WebView). Same underlying
+problem as the robot's hash-dir CA store (§5), but this time
+unreachable: the test phone isn't rooted, so there's no way to drop a
+hash-named cert file into that directory.
+
+The fix: [`reflutter`](https://github.com/null0x4d/reflutter) (`pip
+install reflutter`) identifies the app's exact Flutter engine build from
+the snapshot hash embedded in `libapp.so` and fetches a pre-patched
+`libflutter.so` for that build with Dart's own certificate validation
+disabled — a pure binary swap, no runtime instrumentation needed.
+`make-custom-apk.sh` runs this automatically on the arm64 split.
+
+### 7b. The region-policy gate (not a login problem)
+
+Even with TLS fully working, the app blocked the device card with "Due
+to policy reasons, this device is not supported in the country/region
+where your user account is registered." This looks like a login/account
+problem but isn't — it's unrelated to `user-device-platform-server/
+policy/getPolicyStatus` (that endpoint is actually
+`PolicyStatusModel`/privacy-policy-agreement plumbing, confirmed by
+decompiling it with [blutter](https://github.com/worawit/blutter)).
+
+The real source, traced through the blutter-decompiled Dart source:
+`RobotNetDetector.detectCurrentSite` → `RobotNetCheckRepo.
+getDeviceDetailInfo` → `NRDeviceDetailRequester`, which hits
+`GET /sweeper-app-server/v1/sweeper/getDeviceInfo/`. The response model
+(`nr_networking/model/device/device_detail_info.dart`) carries a field
+literally named `is_same_site` (bool) — the emulator's old generic
+`{result: {}}` catch-all left it absent, which the app reads as false.
+`emulator.py` now serves this endpoint directly with `is_same_site:
+true`, `device_site_code`, and `support_country_list`, plus a proper
+`/iot-broker-discover/app/v1/broker/discover` response (the endpoint the
+app actually polls for the MQTT broker address, distinct from the one
+`_login` returns).
+
+When reverse-engineering a response shape blind, decompiling the Dart
+AOT snapshot with blutter and grepping the `_$<Model>FromJson` method
+for its literal JSON key strings is far more reliable than guessing
+field names from REST traffic alone — `json_serializable`'s generated
+code embeds every key as a plain string constant right next to the
+field read.
