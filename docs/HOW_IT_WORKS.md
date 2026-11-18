@@ -162,3 +162,12 @@ the *client actually has DNS for*: the robot and stock app only have
 family (`us-01.mqtt.narwaltech.com` vs `us-01.mqtt.emulator.local`) —
 mosquitto itself only serves one fixed leaf regardless, which is fine
 since the app's MQTT client doesn't validate the cert anyway.
+
+One more install-time gotcha: `base.apk`'s manifest declares
+`android:requiredSplitTypes="base__abi,base__density"` — the device
+install is rejected (`INSTALL_FAILED_MISSING_SPLIT`) unless **both** an
+ABI split and a density split are present, not just the arm64 one.
+`make-custom-apk.sh` now pulls in every `split_config.*dpi.apk` sitting
+next to the arm64 split (unmodified content, just re-signed with the
+rest — every split in one install must share the same signing cert)
+and prints the full `adb install-multiple` line with all of them.

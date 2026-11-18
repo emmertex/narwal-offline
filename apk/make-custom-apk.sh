@@ -21,7 +21,11 @@
 #
 # Requirements: apktool, zipalign + apksigner (Android build-tools)
 # or jarsigner, and the app bundle. Works with the split APKM from
-# APKMirror (base.apk + split_config.arm64_v8a.apk).
+# APKMirror (base.apk + split_config.arm64_v8a.apk + whichever
+# split_config.*dpi.apk density splits are present — base.apk declares
+# requiredSplitTypes="base__abi,base__density", so at least one density
+# split must be installed alongside the abi split or the whole install
+# is rejected with INSTALL_FAILED_MISSING_SPLIT).
 #
 # Usage: ./make-custom-apk.sh /path/to/APKM-or-dir outdir [ca-cert]
 set -euo pipefail
@@ -38,14 +42,30 @@ if [ -f "$SRC" ]; then
 fi
 BASE="$OUT/work/base.apk"
 ARM="$OUT/work/split_config.arm64_v8a.apk"
-[ -f "$BASE" ] || BASE="$SRC/base.apk"
-[ -f "$ARM" ] || ARM="$SRC/split_config.arm64_v8a.apk"
+SRC_DIR="$OUT/work"
+[ -f "$BASE" ] || { BASE="$SRC/base.apk"; SRC_DIR="$SRC"; }
+[ -f "$ARM" ] || ARM="$SRC_DIR/split_config.arm64_v8a.apk"
 [ -f "$BASE" ] && [ -f "$ARM" ] || { echo "base + arm64 split required"; exit 1; }
-# the rest of the script works on copies named base.apk /
-# split_config.arm64_v8a.apk inside $OUT/work, regardless of whether
-# SRC was a .apkm file (already unzipped there above) or a directory.
+# the rest of the script works on copies inside $OUT/work, regardless of
+# whether SRC was a .apkm file (already unzipped there above) or a dir.
 [ "$BASE" = "$OUT/work/base.apk" ] || cp "$BASE" "$OUT/work/base.apk"
 [ "$ARM" = "$OUT/work/split_config.arm64_v8a.apk" ] || cp "$ARM" "$OUT/work/split_config.arm64_v8a.apk"
+
+# base.apk's manifest requires a density split too
+# (android:requiredSplitTypes="base__abi,base__density") — an ABI split
+# alone gets the whole install rejected with INSTALL_FAILED_MISSING_SPLIT.
+# Pull in every split_config.*dpi.apk sitting next to the arm64 split
+# (unmodified — they carry no code, just density-specific resources) so
+# at least one matches the test device; all splits of one install must
+# share our signing key, so they get signed below along with the rest.
+DENSITY_SPLITS=()
+for f in "$SRC_DIR"/split_config.*dpi.apk; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  [ "$b" = "$OUT/work/$b" ] || cp "$f" "$OUT/work/$b"
+  DENSITY_SPLITS+=("$b")
+done
+[ "${#DENSITY_SPLITS[@]}" -gt 0 ] || echo "WARNING: no split_config.*dpi.apk found next to the arm64 split — install will fail with INSTALL_FAILED_MISSING_SPLIT without one."
 
 # 1. patch libapp.so inside the base split
 cd "$OUT/work"
@@ -108,30 +128,35 @@ KEY="$OUT/work/test.keystore"
   -keyalg RSA -keysize 2048 -validity 10000 -storepass narwaloffline -keypass narwaloffline \
   -dname "CN=narwal-offline" 2>/dev/null
 
+ALL_APKS=(base.apk split_config.arm64_v8a.apk "${DENSITY_SPLITS[@]}")
+
 if command -v apksigner >/dev/null; then
-  for apk in base.apk split_config.arm64_v8a.apk; do
+  for apk in "${ALL_APKS[@]}"; do
     zipalign -f 4 "$apk" "$apk.aligned" && mv "$apk.aligned" "$apk"
     apksigner sign --ks "$KEY" --ks-pass pass:narwaloffline --key-pass pass:narwaloffline "$apk"
   done
 else
   echo "apksigner not found — falling back to jarsigner (v1 only; may not install on Android 11+)"
-  for apk in base.apk split_config.arm64_v8a.apk; do
+  for apk in "${ALL_APKS[@]}"; do
     jarsigner -keystore "$KEY" -storepass narwaloffline "$apk" narwaloffline >/dev/null
   done
 fi
 
-cp base.apk "$OUT/narwal-offline-base.apk"
-cp split_config.arm64_v8a.apk "$OUT/narwal-offline-arm64.apk"
-cat <<DONE
+OUT_APKS=()
+cp base.apk "$OUT/narwal-offline-base.apk"; OUT_APKS+=("$OUT/narwal-offline-base.apk")
+cp split_config.arm64_v8a.apk "$OUT/narwal-offline-arm64.apk"; OUT_APKS+=("$OUT/narwal-offline-arm64.apk")
+for b in "${DENSITY_SPLITS[@]}"; do
+  out_name="narwal-offline-${b#split_config.}"
+  cp "$b" "$OUT/$out_name"; OUT_APKS+=("$OUT/$out_name")
+done
 
-Built:
-  $OUT/narwal-offline-base.apk
-  $OUT/narwal-offline-arm64.apk
-
-Install BOTH (adb install-multiple, or \`pm install-create\` ritual):
-  adb install-multiple $OUT/narwal-offline-base.apk $OUT/narwal-offline-arm64.apk
-
-DNS: point *.emulator.local at your emulator box
-(dnsmasq: address=/emulator.local/10.x.y.z)
-Login with anything — the emulator accepts all credentials.
-DONE
+echo
+echo "Built:"
+for a in "${OUT_APKS[@]}"; do echo "  $a"; done
+echo
+echo "Install ALL of them together (adb install-multiple, or \`pm install-create\` ritual):"
+echo "  adb install-multiple ${OUT_APKS[*]}"
+echo
+echo "DNS: point *.emulator.local at your emulator box"
+echo "(dnsmasq: address=/emulator.local/10.x.y.z)"
+echo "Login with anything — the emulator accepts all credentials."
