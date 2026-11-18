@@ -19,10 +19,16 @@ import argparse
 import json
 import os
 import ssl
+import struct
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+try:
+    import paho.mqtt.client as mqtt_client
+except ImportError:
+    mqtt_client = None
 
 ROBOT = {  # edit for your robot — `python3 ../tools/narwal_access.py devices`
     "productId": "EHf6cRNRGT",
@@ -48,6 +54,105 @@ LOG = os.environ.get("NARWAL_EMU_LOG", "/tmp/narwal_emulator.log")
 def w(line: str):
     with open(LOG, "a") as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+
+
+# ------------------------------------------------------------ live robot state
+# work-status/get (HTTP, used for the device-LIST card) used to hardcode
+# battery_percentage=80 forever, while the device HOMEPAGE shows the real
+# number because it reads it off the robot's own MQTT status directly
+# (peer-to-peer through mosquitto, bypassing us entirely). Rather than
+# duplicate that mismatch, subscribe to the same MQTT topic here and feed
+# the real number back into the HTTP response too.
+#
+# status/robot_base_status is a RobotBaseStatus protobuf
+# (app_protol/proto/core/device_shadow/) — we don't have the full .proto,
+# but the wire format is self-describing enough to pull one field out
+# generically: field 2, wiretype 5 (fixed32), decodes as an IEEE-754 float
+# and was empirically 100.0 while the app displayed "100%" live.
+ROBOT_STATE = {"battery": 80}
+_state_lock = threading.Lock()
+
+
+def _decode_protobuf_fields(data: bytes) -> dict[int, list]:
+    out: dict[int, list] = {}
+    i = 0
+    n = len(data)
+    while i < n:
+        tag, shift = 0, 0
+        while True:
+            b = data[i]; i += 1
+            tag |= (b & 0x7f) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+        field_num, wire_type = tag >> 3, tag & 0x7
+        if wire_type == 0:  # varint
+            val, shift = 0, 0
+            while True:
+                b = data[i]; i += 1
+                val |= (b & 0x7f) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+        elif wire_type == 1:  # fixed64
+            val = data[i:i + 8]; i += 8
+        elif wire_type == 2:  # length-delimited
+            length, shift = 0, 0
+            while True:
+                b = data[i]; i += 1
+                length |= (b & 0x7f) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+            val = data[i:i + length]; i += length
+        elif wire_type == 5:  # fixed32
+            val = data[i:i + 4]; i += 4
+        else:
+            break  # unsupported wire type; stop rather than misparse
+        out.setdefault(field_num, []).append(val)
+    return out
+
+
+def _on_mqtt_message(_client, _userdata, msg):
+    if not msg.topic.endswith("/status/robot_base_status"):
+        return
+    try:
+        fields = _decode_protobuf_fields(msg.payload)
+        raw = fields.get(2, [None])[0]
+        if isinstance(raw, bytes) and len(raw) == 4:
+            battery = struct.unpack("<f", raw)[0]
+            with _state_lock:
+                ROBOT_STATE["battery"] = round(battery)
+    except Exception as e:
+        w(f"mqtt state decode error: {e}")
+
+
+def _start_mqtt_state_listener():
+    if mqtt_client is None:
+        w("paho-mqtt not installed; work-status/get will keep a static battery value")
+        return
+
+    def run():
+        client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2)
+        client.on_message = _on_mqtt_message
+
+        def on_connect(c, _u, _f, _rc, _p=None):
+            # Topics are published with a leading "/" (e.g.
+            # "/EHf6cRNRGT/<deviceId>/status/robot_base_status"), i.e. an
+            # empty first level — "+/+/status/..." doesn't match that,
+            # subscribe to everything and filter by suffix in on_message.
+            c.subscribe("#", qos=0)
+
+        client.on_connect = on_connect
+        while True:
+            try:
+                client.connect("127.0.0.1", 1884, 60)
+                client.loop_forever()
+            except Exception as e:
+                w(f"mqtt state listener error, retrying: {e}")
+                time.sleep(5)
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -91,6 +196,8 @@ class Handler(BaseHTTPRequestHandler):
             self._policy_status(body)
         elif "broker/discover" in path:
             self._broker_discover(host)
+        elif "consumables/pull" in path:
+            self._consumables_pull(body)
         elif "device-bootstrap" in path or "bootstrap" in path:
             # Sentinel experiment: if the robot honors a server-provided MQTT
             # endpoint, we see bootstrap-sentinel… in DNS and (port 1883) a
@@ -124,6 +231,10 @@ class Handler(BaseHTTPRequestHandler):
             self._work_status()
         elif "oobe/getOobeStatus" in path:
             self._oobe_status()
+        elif "schedule/getScheduleTaskList" in path:
+            self._schedule_task_list()
+        elif "bat/health/pull" in path:
+            self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
         else:
             self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
 
@@ -275,9 +386,11 @@ class Handler(BaseHTTPRequestHandler):
         # a CastError that silently breaks the whole status fetch
         # (caught upstream with no visible log), which is exactly what
         # was blocking "Go to Device Homepage" from doing anything.
+        with _state_lock:
+            battery = ROBOT_STATE["battery"]
         self._json({"code": 0, "msg": "ok", "success": True, "result": {
             "online": True,
-            "battery_percentage": 80, "battery_status": 0,
+            "battery_percentage": battery, "battery_status": 0,
             "fault": False, "need_subscribe": False}})
 
     def _sweeper_device_info(self, host: str = ""):
@@ -332,6 +445,52 @@ class Handler(BaseHTTPRequestHandler):
         # cancelling it both just dumped you back at the device list.
         self._json({"code": 0, "msg": "ok", "success": True,
                     "result": {"oobeStatus": 1}})
+
+    def _schedule_task_list(self):
+        # TimingTaskModel (nr_networking/model/cleanplan/timing_task_model.dart)
+        # is a single object with these four keys, each a list — our old
+        # generic {result:{}} catch-all gave a dict missing all of them,
+        # which the Timing Plan tab's fromJson may read with a bare `as
+        # List` cast (no null-check), throwing a silently-swallowed
+        # CastError that likely kept the whole tab from ever rendering
+        # ("I cannot see them in the app either"). This is a cloud-side
+        # cache/mirror of the schedules the robot holds — actually
+        # creating/editing/deleting a schedule goes straight to the robot
+        # over MQTT (app_protol/proto/mqtt/srv/schedule/*, topics like
+        # /schedule/clean_schedule/{get,add,update,delete}), peer-to-peer
+        # through mosquitto, with no involvement from this emulator at
+        # all. So this fixes the tab from being stuck/blank, but any
+        # schedule you had configured before won't reappear here until
+        # you re-add it through the app — which should then round-trip
+        # live to the real robot like normal.
+        self._json({"code": 0, "msg": "ok", "success": True, "result": {
+            "task_status_info": {},
+            "scheduled_cleaning_tasks": [],
+            "scheduled_video_cruise_tasks": [],
+            "clean_records": []}})
+
+    def _consumables_pull(self, body: bytes = b""):
+        # NRConsumableInfoModel (nr_networking/network/new/model/
+        # nr_consumable_info_model.dart) — one entry per requested "type"
+        # code (the app sends {"type": [<codes>]} in the POST body). Our
+        # old generic {result:{}} left every consumable's usage_duration
+        # at 0, which the UI reads as "0% used" / "0 hours" for every
+        # filter/brush/mop — not wrong exactly, just not live-tracked:
+        # we have no persisted history of real runtime to report, so
+        # this is a static, plausible-looking placeholder (life mostly
+        # full) rather than a real number.
+        try:
+            req = json.loads(body or b"{}")
+        except Exception:
+            req = {}
+        types = req.get("type") or [0]
+        result = [{"type": t, "consumables_code": t, "item_type": 1,
+                    "name": "", "subtitle": "", "icon": "",
+                    "usage_duration": 20, "total_duration": 300,
+                    "progress_bar_switch": True, "mall_bar_switch": False,
+                    "reset_btn_switch": True, "mall_link": "",
+                    "record_type": 0} for t in types]
+        self._json({"code": 0, "msg": "ok", "success": True, "result": result})
 
     def _devices(self, host: str = ""):
         # deviceSiteCode has to match the account's registered country (set
@@ -420,6 +579,7 @@ def main():
     ap.add_argument("--port", type=int, default=443)
     args = ap.parse_args()
     srv = SNIServer(("0.0.0.0", args.port), os.path.abspath(args.pki))
+    _start_mqtt_state_listener()
     w(f"=== emulator on :{args.port}, pki={args.pki} ===")
     print(f"emulator listening on :{args.port} (logs: {LOG})")
     srv.serve_forever()
