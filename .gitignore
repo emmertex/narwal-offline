@@ -18,3 +18,15 @@ robot_dump/*
 !robot_dump/etc_sysctl.conf.orig
 !robot_dump/experiments/
 !robot_dump/experiments/**
+
+# decrypted firmware (2.6GB tree; keep on disk, commit manifests only)
+robot_dump/firmware_plaintext/decrypted_e3.tar.gz
+robot_dump/firmware_plaintext/fwback.tgz
+robot_dump/firmware_plaintext/fw_prefix.tar
+robot_dump/firmware_plaintext/npkg_extract/*/*/*.tar.gz
+robot_dump/firmware_plaintext/npkg_extract/*/*/rootfs
+robot_dump/firmware_plaintext/npkg_extract/*/*/oem
+robot_dump/firmware_plaintext/npkg_extract/*/*/original
+robot_dump/firmware_plaintext/npkg_extract/*/*/t1_mr813.swu
+robot_dump/firmware_plaintext/rootfs_tree/
+robot_dump/binaries/

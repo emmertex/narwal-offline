@@ -58,7 +58,7 @@ class Link:
         if not self.ev_ok.wait(15):
             sys.exit("broker connect failed")
 
-    def _on_msg(self, c, u, f, m):
+    def _on_msg(self, c, u, m):
         props = getattr(m, "properties", None)
         corr = getattr(props, "CorrelationData", None) if props else None
         if corr is not None and corr in self.pending and isinstance(self.pending[corr], threading.Event):
