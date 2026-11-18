@@ -90,11 +90,20 @@ src = "split_config.arm64_v8a.apk"; tmp = "arm64-new.apk"
 with zipfile.ZipFile(src) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
     for item in zin.infolist():
         if item.filename == "lib/arm64-v8a/libapp.so":
-            zout.write("lib/arm64-v8a/libapp.so", item.filename)
+            # the manifest has android:extractNativeLibs="false", so the
+            # OS mmaps this .so straight out of the APK — it MUST stay
+            # STORED (uncompressed), matching the original entry, or
+            # install fails with INSTALL_FAILED_INVALID_APK ("Failed to
+            # extract native libraries"). zipalign -p (below) handles
+            # the page-alignment half of that requirement.
+            assert item.compress_type == zipfile.ZIP_STORED, \
+                f"expected libapp.so stored uncompressed, got compress_type={item.compress_type}"
+            zout.write("lib/arm64-v8a/libapp.so", item.filename,
+                       compress_type=zipfile.ZIP_STORED)
         else:
             zout.writestr(item, zin.read(item.filename))
 shutil.move(tmp, src)
-print("libapp.so replaced inside split")
+print("libapp.so replaced inside split (kept STORED/uncompressed)")
 PYEOF
 
 # 2. patch base.apk's network_security_config to trust the offline CA
@@ -132,7 +141,7 @@ ALL_APKS=(base.apk split_config.arm64_v8a.apk "${DENSITY_SPLITS[@]}")
 
 if command -v apksigner >/dev/null; then
   for apk in "${ALL_APKS[@]}"; do
-    zipalign -f 4 "$apk" "$apk.aligned" && mv "$apk.aligned" "$apk"
+    zipalign -f -p 4 "$apk" "$apk.aligned" && mv "$apk.aligned" "$apk"
     apksigner sign --ks "$KEY" --ks-pass pass:narwaloffline --key-pass pass:narwaloffline "$apk"
   done
 else
