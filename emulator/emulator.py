@@ -120,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
             self._broker_discover(host)
         elif "sweeper/getDeviceInfo" in path:
             self._sweeper_device_info(host)
+        elif "work-status/get" in path:
+            self._work_status()
         else:
             self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
 
@@ -219,6 +221,31 @@ class Handler(BaseHTTPRequestHandler):
             "host": mqtt_host, "port": 8883, "mqttHost": mqtt_host, "mqttPort": 8883,
             "ssl": True, "useSsl": True, "tls": True, "useTls": True,
             "brokerHost": mqtt_host, "brokerPort": 8883}})
+
+    def _work_status(self):
+        # RobotWorkStatusManager._toSnapshot (device_card/business/
+        # robot_work_status_manager.dart) derives the device card's
+        # DeviceOnlineState from RobotWorkStatusWorkingStatus.isOffline(),
+        # which is just `online == false` on this model
+        # (device_card/models/robot_work_status.dart field "online").
+        # Our old generic {result:{}} left "online" absent -> false ->
+        # permanently "offline", which is why the card never shows a
+        # battery percentage and "Go to Device Homepage" never actually
+        # navigates anywhere (no crash, no log — the app just never
+        # reaches that handler because the device never leaves the
+        # offline/unknown classification). "status": "free" is one of
+        # the task-state strings the model's fromJson recognizes
+        # (free/pause/recall/fault/station_work/build_map/in_station).
+        # battery_status is `int?` (an index into a fixed BatteryStatus
+        # list via firstWhere/fromValue) despite the human-readable
+        # name — a string here hits `r3 as int?` in fromJson and throws
+        # a CastError that silently breaks the whole status fetch
+        # (caught upstream with no visible log), which is exactly what
+        # was blocking "Go to Device Homepage" from doing anything.
+        self._json({"code": 0, "msg": "ok", "success": True, "result": {
+            "online": True, "status": "free", "type": "free",
+            "battery_percentage": 80, "battery_status": 0,
+            "fault": False, "need_subscribe": False}})
 
     def _sweeper_device_info(self, host: str = ""):
         # This is DeviceDetailInfo (nr_networking/model/device/device_detail_info.dart),
