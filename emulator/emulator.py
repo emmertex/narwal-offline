@@ -125,6 +125,16 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
 
+    def do_DELETE(self):
+        host = (self.headers.get("Host") or "").split(":")[0]
+        w(f"DELETE {host}{self.path}")
+        self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
+
+    def do_PUT(self):
+        host = (self.headers.get("Host") or "").split(":")[0]
+        w(f"PUT {host}{self.path}")
+        self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
+
     # ------------------------------------------------------------ OTA oracle
     def _ota_check(self):
         """Serve /var/tmp/narwal_cap/ota_override.json if present, else no-update.
@@ -215,12 +225,20 @@ class Handler(BaseHTTPRequestHandler):
         # Same MQTT endpoint as _login, mirroring the domain family the
         # client actually has DNS for (see _login's comment) — the app
         # polls this independently of login to (re)learn the broker.
+        #
+        # NRMqttServersRequester (nr_networking/.../nr_mqtt_servers_requester.dart)
+        # is consumed by a closure in device_hub_bootstrap.dart that does
+        # `response.result` and AwaitWithTypeCheck's it directly against
+        # `String?` — confirmed live via Frida (Gadget-injected APK, real
+        # hardware), hooking the exact instruction right after that type
+        # check and finding it never executes, because `result` here was a
+        # nested dict, which fails the String? check and throws a silent
+        # TypeError, aborting the whole MQTT connect attempt with no crash,
+        # no log (the same silent-failure pattern as every other gate in
+        # this app). `result` must be the bare hostname string.
         mqtt_host = ("us-01.mqtt.emulator.local" if host.endswith(".emulator.local")
                      else "us-01.mqtt.narwaltech.com")
-        self._json({"code": 0, "msg": "ok", "success": True, "result": {
-            "host": mqtt_host, "port": 8883, "mqttHost": mqtt_host, "mqttPort": 8883,
-            "ssl": True, "useSsl": True, "tls": True, "useTls": True,
-            "brokerHost": mqtt_host, "brokerPort": 8883}})
+        self._json({"code": 0, "msg": "ok", "success": True, "result": mqtt_host})
 
     def _work_status(self):
         # RobotWorkStatusManager._toSnapshot (device_card/business/
@@ -229,13 +247,26 @@ class Handler(BaseHTTPRequestHandler):
         # which is just `online == false` on this model
         # (device_card/models/robot_work_status.dart field "online").
         # Our old generic {result:{}} left "online" absent -> false ->
-        # permanently "offline", which is why the card never shows a
-        # battery percentage and "Go to Device Homepage" never actually
-        # navigates anywhere (no crash, no log — the app just never
-        # reaches that handler because the device never leaves the
-        # offline/unknown classification). "status": "free" is one of
-        # the task-state strings the model's fromJson recognizes
-        # (free/pause/recall/fault/station_work/build_map/in_station).
+        # permanently "offline".
+        #
+        # But `online` alone isn't enough: DeviceCardStore.isDeviceOnline()
+        # (device_card_store.dart) ALSO requires the snapshot's working
+        # status to equal the exact DeviceWorkingStatus instance @1f69ee1.
+        # DeviceWorkingStatus.fromStatus() (device_working_status.dart)
+        # returns that same instance as its DEFAULT/fallback — when
+        # `status` is null, or doesn't match any of the 21 recognized
+        # status strings — so the "status" key is deliberately left out
+        # here rather than guessed; omitting it is what actually produces
+        # @1f69ee1. Sending the wrong status string (we previously tried
+        # "free", which apparently maps to a *different*, non-default
+        # instance) left isDeviceOnline() false, which is what was
+        # silently swallowing "Go to Device Homepage": _gotoWorkHome
+        # (device_card_list_controller.dart) checks isDeviceOnline() and,
+        # if false, calls DeviceCardStore.classify() + shows
+        # showScrubberOfflineDialog() and returns — no crash, no log,
+        # just a silent bail confirmed live via Frida (Gadget-injected
+        # APK, real hardware) tracing _gotoWorkHome's call graph.
+        #
         # battery_status is `int?` (an index into a fixed BatteryStatus
         # list via firstWhere/fromValue) despite the human-readable
         # name — a string here hits `r3 as int?` in fromJson and throws
@@ -243,7 +274,7 @@ class Handler(BaseHTTPRequestHandler):
         # (caught upstream with no visible log), which is exactly what
         # was blocking "Go to Device Homepage" from doing anything.
         self._json({"code": 0, "msg": "ok", "success": True, "result": {
-            "online": True, "status": "free", "type": "free",
+            "online": True,
             "battery_percentage": 80, "battery_status": 0,
             "fault": False, "need_subscribe": False}})
 
@@ -251,21 +282,36 @@ class Handler(BaseHTTPRequestHandler):
         # This is DeviceDetailInfo (nr_networking/model/device/device_detail_info.dart),
         # fetched by NRDeviceDetailRequester (path
         # /sweeper-app-server/v1/sweeper/getDeviceInfo/) and consumed by
-        # RobotNetDetector.detectCurrentSite — the real source of the "Due
-        # to policy reasons... not supported in the country/region where
-        # your user account is registered" gate (nothing to do with
-        # getPolicyStatus/PolicyStatusModel, which is only the privacy-
-        # policy-agreement flow). The decompiled fromJson shows the exact
-        # fields: is_same_site (bool) is the pass/fail flag, device_site_code
-        # names the device's own site, support_country_list is checked
-        # elsewhere for the "View Supported Countries" list.
+        # two completely independent gates:
+        #
+        # 1. The device-card-level "Due to policy reasons... not supported
+        #    in the country/region..." banner — satisfied by just having
+        #    device_site_code match the account's country.
+        # 2. _RobotNetDetector.detectSite() (robot_net_detector.dart),
+        #    which site_policy_handler.dart's detectForNavigation() awaits
+        #    as the final gate before "Go to Device Homepage" actually
+        #    navigates anywhere — confirmed live via Frida (Gadget-injected
+        #    APK on real hardware) tracing the whole _gotoWorkHome call
+        #    graph down to this exact check. detectSite() reads
+        #    `is_same_site` as `num?` (NOT bool — a bool here fails the
+        #    type check and the field silently parses as something that
+        #    never equals the value it's compared against). detectSite()
+        #    does `cmp w1, #2` against the raw (DecompressPointer'd) field
+        #    value, but Dart AOT arm64 tags SMIs as `value << 1`, so that
+        #    raw immediate #2 decodes to the real Dart int 1 (confirmed via
+        #    an AllocateArray call elsewhere in this same file that passes
+        #    raw immediate #4 for an array that only ever stores 2
+        #    elements). So the JSON value must be int 1, not 2. Anything
+        #    else triggers an "environment mismatch" prompt path and
+        #    returns false, making _gotoWorkHome bail out with no crash,
+        #    no log.
         prefix = host.split("-", 1)[0]
         site = {"aus": "au"}.get(prefix, prefix) or "us"
         self._json({"code": 0, "msg": "ok", "success": True, "result": {
             "deviceId": ROBOT["deviceId"], "productId": ROBOT["productId"],
             "robotName": ROBOT["robotName"], "snNumber": ROBOT["snNumber"],
             "firmwareVersion": ROBOT["firmwareVersion"],
-            "is_same_site": True, "device_site_code": site,
+            "is_same_site": 1, "device_site_code": site,
             "support_country_list": [site],
             "online": True, "isOnline": True, "status": 1}})
 
