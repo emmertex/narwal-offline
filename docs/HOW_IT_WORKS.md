@@ -103,24 +103,23 @@ line is load-bearing: dnsmasq's `address=` alone still forwards AAAA
 queries upstream, and **the robot prefers IPv6** — without it, the
 hijack silently leaks to the real cloud.
 
-## 5. The remaining blocker: the itls trust store
+## 5. The TLS trust story (solved)
 
-The robot runs at least three TLS client stacks:
+The robot's MQTT client (inside `application_node`, paho MQTTAsync)
+configures `set_enable_server_cert_auth(true)` with
+`ca_path("/etc/ssl/certs")` — an OpenSSL **directory** trust store that
+only consults `<subject-hash>.0` entries. That is why appending a CA to
+any bundle file changes nothing for MQTT: you must add your CA as
+`/etc/ssl/certs/<your-CA-subject-hash>.0` (a hash-named file — the
+setup flow installs it through the command channel; a plain file copy
+cannot be done over the MQTT write primitive because it cannot create
+new files). With that entry in place the robot verifies a leaf from
+your CA and connects to your broker — verified live end-to-end.
 
-| Channel | Stack | Trusts our installed CA? |
-|---|---|---|
-| OTA check (us-open) | system-CA client | **YES** (first-attempt accept after install+reboot) |
-| device API (us.device) | Alibaba ID²/itls | no — `unknown_ca` every time |
-| MQTT :8883 | Alibaba ID²/itls (client id `sweeper_*`) | no — `unknown_ca` every time |
-
-So the CA-bundle write alone does not flip the channels that matter
-most. The itls store is per-device provisioned (ID²) and/or compiled
-in; finding it is the open task — likely via the same file-read
-primitive once reads recover (hunt `/userdata/...` ID² paths), or by
-dumping the communicator binary. This is also why the robot ended up
-cloud-offline during testing: its MQTT kept rejecting our broker while
-DNS pointed there. Everything is currently reverted and the robot is
-back on the real cloud.
+The other clients: the OTA checker (us-open) is lenient and also honors
+the system bundle (your CA can be appended there too); the bootstrap
+and telemetry clients still reject third-party CAs — they don't matter
+for local control (bootstrap only gates first-boot provisioning).
 
 ## 6. The firmware side (why we didn't need it)
 
