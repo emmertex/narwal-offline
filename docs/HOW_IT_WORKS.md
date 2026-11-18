@@ -259,3 +259,116 @@ for its literal JSON key strings is far more reliable than guessing
 field names from REST traffic alone — `json_serializable`'s generated
 code embeds every key as a plain string constant right next to the
 field read.
+
+> **Correction (see §7c):** `is_same_site` is not a `bool` and the
+> value above was wrong. It's read as `num?` and compared with
+> `cmp w1, #2` against the raw (still-tagged) field value — which,
+> because Dart AOT arm64 tags SMIs as `value << 1`, actually means the
+> real integer must be `1`. `emulator.py` now sends `"is_same_site": 1`.
+
+### 7c. Getting past "Go to Device Homepage" and the whole MQTT pipeline
+
+The region-policy fix in §7b got the device-card-level banner to go
+away and the battery/status to render, but tapping "Go to Device
+Homepage" still did nothing — no crash, no log, no navigation. This
+took rooting out three more compounding, independently-silent bugs,
+found by Frida-tracing the real patched APK on real hardware (see
+§7d for how that tracing was set up without rooting the phone).
+
+**Finding the actual blocker.** Hooking the whole `_gotoWorkHome` call
+graph (`device_card_list_controller.dart`) live showed it bailing
+every single time inside `SitePolicyHandler.detectForNavigation()` →
+`_RobotNetDetector.detectSite()`, which re-reads the *same*
+`getDeviceInfo` response as §7b but for a second, independent gate:
+it requires `is_same_site` to equal a specific literal when compared
+with `cmp w1, #2`. The naive reading is "field must equal 2", but
+Dart AOT's arm64 compressed-pointer ABI tags small integers as
+`value << 1` — confirmed unambiguously by a completely unrelated
+`AllocateArray()` call elsewhere in the same decompiled file that
+passes a raw immediate `#4` as a map's length for a literal that only
+ever stores 2 key/value entries, i.e. real value `2` is encoded as
+raw `4`. By the same tagging, raw `#2` decodes to real value `1`. So
+the field must be **int `1`**, not `2` — fixed in `_sweeper_device_info`.
+
+**DeviceHub never starts.** With that fixed, tapping the button
+started navigating into the real device homepage code path
+(`isDeviceOnline`, `CardClassifier.classify`, `goWorkHome` all started
+firing), and the UI did land on the real homepage — but it showed
+"Network error. Reconnecting…" forever, and `DeviceHubLifecycle.
+start()` (the one function that ever calls `warmUp()` /
+`ensureConnected()` on the MQTT transport pool) never fired at all,
+even on a cold app launch. It's called from exactly two places
+(`nr_app_init.dart`, `nr_app_startup.dart`), and both are gated behind
+a reactive **status-change listener** (`"userStatusController"`,
+tag `"NRUserStatus.login"`) — it fires on the transition into the
+logged-in state, not on "being logged in" as a steady state. An app
+session restored from a cached token on cold start never crosses that
+transition, so `DeviceHub` (and MQTT) never initializes for the whole
+session, however long you poke at the UI afterwards.
+
+Forcing a real login transition (log out → log back in through the
+UI) immediately fired `DeviceHubLifecycle.start` → `DeviceHub.start`
+→ `CompositeTransportFactory.warmUp` → `...ensureConnected`. Except
+logout itself was silently failing: it calls
+`DELETE /user-server/v2/push/deletePushInfo`, and the emulator's
+`BaseHTTPRequestHandler` had no `do_DELETE`, so Python returned a
+bare `501 Unsupported method`, which stalled the logout flow before
+it ever got to flip the user-status Rx value. Added `do_DELETE` and
+`do_PUT` (both just the usual generic-success JSON) and logout started
+completing properly.
+
+**The connect attempt itself was silently throwing.** Even after a
+real login transition, `MqttTransportAdapter._mqttConnect()` kept
+firing on its own retry timer but never got anywhere near
+constructing an `MqttServerClient` — confirmed by hooking
+`MqttServerClient.withPort`'s constructor directly and never seeing
+it hit. Reading `_mqttConnect`'s disassembly found it resolves the
+MQTT host by awaiting a closure
+(`NRMqttServersRequester` → `/iot-broker-discover/app/v1/broker/
+discover`) and then runs `AwaitWithTypeCheck` against the result
+with static type `String?`. `emulator.py`'s `_broker_discover` was
+returning `result` as a nested dict (`{host, port, mqttHost, ...}`,
+guessed blind, never verified against a model) — which fails that
+type check and throws a `TypeError` that's swallowed with no log,
+aborting the connect attempt every single retry, forever. Fixed by
+making `result` the bare hostname string (`"us-01.mqtt.emulator.local"`),
+matching what `response.result` is actually awaited and type-checked
+as in `device_hub_bootstrap.dart`.
+
+With all three fixed, the phone establishes a genuine MQTT TLS
+connection (`app_offline-emulator-user_<uuid>` in the mosquitto log,
+from the phone's real LAN IP, not the dev machine's) and the device
+homepage renders the robot's real live status and its actual learned
+floor map — full functionality, no cloud involved.
+
+### 7d. Frida Gadget injection without rooting the phone
+
+All of the tracing above was done live, via Frida, on an **unrooted**
+real phone, using [Frida Gadget](https://frida.re/docs/gadget/)
+injection instead of `frida-server` (which needs root):
+
+1. Merge the split APKs into one universal APK with
+   [APKEditor](https://github.com/REAndroid/APKEditor)
+   (`java -jar APKEditor.jar m -i <splits_dir> -o merged.apk`) —
+   `objection patchapk` needs a single APK.
+2. `objection patchapk -s merged.apk` to inject `libfrida-gadget.so`
+   + a `System.loadLibrary()` call into smali and re-sign.
+3. Fix objection's native-lib directory bug (it drops the gadget
+   `.so` under `lib/arm64/` instead of the exact ABI directory name
+   Android requires, `lib/arm64-v8a/`) by rewriting that one zip
+   entry's path while preserving `ZIP_STORED` + alignment, then
+   re-zipalign and re-sign.
+4. Ship a `libfrida-gadget.config.so` (JSON text despite the `.so`
+   extension) next to the gadget library setting
+   `"on_load": "wait"` — this pauses the whole app at startup until
+   a Frida client actually attaches, which is what makes live tracing
+   of app-startup code (like `DeviceHubLifecycle.start`) possible at
+   all.
+5. `adb forward tcp:27042 tcp:27042`, install, launch (it pauses),
+   then `frida -H 127.0.0.1:27042 -n Gadget -l script.js`.
+
+From there, `Interceptor.attach()` on the blutter-derived ARM64
+offsets works exactly like it would on a rooted device via
+`frida-server` — this is a durable, reusable technique for any future
+deep tracing need on this app without touching the phone's bootloader
+or risking a factory reset.
