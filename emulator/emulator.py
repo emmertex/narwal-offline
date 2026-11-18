@@ -86,7 +86,11 @@ class Handler(BaseHTTPRequestHandler):
         elif "/login" in path or "/token/refresh" in path:
             self._login()
         elif "getDeviceInfoList" in path:
-            self._devices()
+            self._devices(host)
+        elif "policy/getPolicyStatus" in path:
+            self._policy_status(body)
+        elif "broker/discover" in path:
+            self._broker_discover(host)
         elif "device-bootstrap" in path or "bootstrap" in path:
             # Sentinel experiment: if the robot honors a server-provided MQTT
             # endpoint, we see bootstrap-sentinel… in DNS and (port 1883) a
@@ -109,9 +113,13 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_fw(path[4:])
             return
         if "getDeviceInfoList" in path:
-            self._devices()
+            self._devices(host)
         elif "/ota/check" in path:
             self._ota_check()
+        elif "broker/discover" in path:
+            self._broker_discover(host)
+        elif "sweeper/getDeviceInfo" in path:
+            self._sweeper_device_info(host)
         else:
             self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
 
@@ -180,13 +188,77 @@ class Handler(BaseHTTPRequestHandler):
             "server": mqtt_host,
             "domain": mqtt_host}})
 
-    def _devices(self):
+    def _policy_status(self, body: bytes):
+        # The app gates the device card on this (policy_type 3 = region/
+        # feature availability, 5 = product-level) before it will let you
+        # into the device homepage; our old generic {result:{}} catch-all
+        # read as "no policy record = restricted", producing the "is not
+        # supported for use in the current country/region... Due to
+        # policy..." banner. Echo every requested policy_type back as
+        # passing, under every plausible field name (status/pass/allow/
+        # support) since we don't have the exact json_serializable key
+        # without decompiling PolicyStatusModel — unknown extra keys are
+        # harmless.
+        try:
+            req = json.loads(body or b"{}")
+        except Exception:
+            req = {}
+        items = []
+        for p in req.get("policy_type_list", [{"policy_type": 3}, {"policy_type": 5}]):
+            items.append({**p, "status": 1, "pass": True, "allow": True,
+                          "support": True, "policy_status": 1, "result": 1})
+        self._json({"code": 0, "msg": "ok", "success": True, "result": items})
+
+    def _broker_discover(self, host: str):
+        # Same MQTT endpoint as _login, mirroring the domain family the
+        # client actually has DNS for (see _login's comment) — the app
+        # polls this independently of login to (re)learn the broker.
+        mqtt_host = ("us-01.mqtt.emulator.local" if host.endswith(".emulator.local")
+                     else "us-01.mqtt.narwaltech.com")
+        self._json({"code": 0, "msg": "ok", "success": True, "result": {
+            "host": mqtt_host, "port": 8883, "mqttHost": mqtt_host, "mqttPort": 8883,
+            "ssl": True, "useSsl": True, "tls": True, "useTls": True,
+            "brokerHost": mqtt_host, "brokerPort": 8883}})
+
+    def _sweeper_device_info(self, host: str = ""):
+        # This is DeviceDetailInfo (nr_networking/model/device/device_detail_info.dart),
+        # fetched by NRDeviceDetailRequester (path
+        # /sweeper-app-server/v1/sweeper/getDeviceInfo/) and consumed by
+        # RobotNetDetector.detectCurrentSite — the real source of the "Due
+        # to policy reasons... not supported in the country/region where
+        # your user account is registered" gate (nothing to do with
+        # getPolicyStatus/PolicyStatusModel, which is only the privacy-
+        # policy-agreement flow). The decompiled fromJson shows the exact
+        # fields: is_same_site (bool) is the pass/fail flag, device_site_code
+        # names the device's own site, support_country_list is checked
+        # elsewhere for the "View Supported Countries" list.
+        prefix = host.split("-", 1)[0]
+        site = {"aus": "au"}.get(prefix, prefix) or "us"
+        self._json({"code": 0, "msg": "ok", "success": True, "result": {
+            "deviceId": ROBOT["deviceId"], "productId": ROBOT["productId"],
+            "robotName": ROBOT["robotName"], "snNumber": ROBOT["snNumber"],
+            "firmwareVersion": ROBOT["firmwareVersion"],
+            "is_same_site": True, "device_site_code": site,
+            "support_country_list": [site],
+            "online": True, "isOnline": True, "status": 1}})
+
+    def _devices(self, host: str = ""):
+        # deviceSiteCode has to match the account's registered country (set
+        # by whatever region the app's first-run screen auto-picked from
+        # the phone's locale/SIM) or the app refuses the device outright
+        # ("Due to policy reasons, this device is not supported in the
+        # country/region where your user account is registered."). Derive
+        # it from the region prefix on the Host header the client is
+        # actually using (e.g. "aus-app.emulator.local" -> "au") instead of
+        # hardcoding one.
+        prefix = host.split("-", 1)[0]
+        site = {"aus": "au"}.get(prefix, prefix) or "us"  # aus -> au, us -> us
         self._json({"code": 0, "err_code": 10000, "msg": "ok", "result": {
             "deviceInfoList": [{
                 "deviceId": ROBOT["deviceId"], "productId": ROBOT["productId"],
                 "robotName": ROBOT["robotName"], "snNumber": ROBOT["snNumber"],
                 "firmwareVersion": ROBOT["firmwareVersion"], "isAutoUpgrade": False,
-                "deviceSiteCode": "us", "extend": {},
+                "deviceSiteCode": site, "extend": {},
             }],
             "productInfoList": [{
                 "productId": ROBOT["productId"], "productModel": ROBOT["robotName"],

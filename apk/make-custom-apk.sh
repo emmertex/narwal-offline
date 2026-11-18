@@ -106,6 +106,50 @@ shutil.move(tmp, src)
 print("libapp.so replaced inside split (kept STORED/uncompressed)")
 PYEOF
 
+# 1b. patch libflutter.so too. The narwaltech.com->emulator.local string
+# swap and the network_security_config trust-anchors (below) only affect
+# Android's own Java-level network stack (OkHttp/HttpsURLConnection,
+# WebView). This app's actual REST calls go through Dart's dart:io
+# networking, which is a separate BoringSSL build baked into
+# libflutter.so that reads Android's SYSTEM CA directory
+# (/system/etc/security/cacerts) directly — bypassing
+# network_security_config and our bundled CA entirely. Getting our CA in
+# there needs root (same hash-dir-CA problem as the robot in
+# docs/HOW_IT_WORKS.md §5, just unreachable here without rooting the test
+# phone). reflutter (pip install reflutter) downloads a known-patched
+# libflutter.so for this exact engine build (matched by its embedded
+# snapshot hash) that accepts any TLS certificate for Dart's own
+# networking — verified: only libflutter.so differs from stock, and it's
+# already STORED/uncompressed like libapp.so needs.
+if command -v reflutter >/dev/null; then
+  rm -rf reflutter_work && mkdir reflutter_work
+  cp split_config.arm64_v8a.apk reflutter_work/for_reflutter.apk
+  if ( cd reflutter_work && reflutter -n for_reflutter.apk ); then
+    python3 - <<'PYEOF'
+import zipfile, shutil
+with zipfile.ZipFile("reflutter_work/release.RE.apk") as patched:
+    info = patched.getinfo("lib/arm64-v8a/libflutter.so")
+    data = patched.read(info)
+src = "split_config.arm64_v8a.apk"; tmp = "arm64-flutter-new.apk"
+with zipfile.ZipFile(src) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+    for item in zin.infolist():
+        if item.filename == "lib/arm64-v8a/libflutter.so":
+            zout.writestr(item.filename, data, compress_type=zipfile.ZIP_STORED)
+        else:
+            zout.writestr(item, zin.read(item.filename))
+shutil.move(tmp, src)
+print("libflutter.so replaced with reflutter-patched build (Dart TLS validation disabled)")
+PYEOF
+  else
+    echo "WARNING: reflutter failed (offline? engine hash not in its CSV yet?) —"
+    echo "  Dart's own REST networking will still reject our CA; login will not work."
+  fi
+  rm -rf reflutter_work
+else
+  echo "WARNING: reflutter not installed (pip install reflutter) —"
+  echo "  Dart's own REST networking will still reject our CA; login will not work."
+fi
+
 # 2. patch base.apk's network_security_config to trust the offline CA
 #    (bundled as a raw resource — no manual "install CA cert" step on
 #    the phone needed).
