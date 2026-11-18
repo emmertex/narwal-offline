@@ -154,20 +154,31 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ payloads
     def _login(self):
-        # Standard app keys + sentinel broker fields: we learn which key the
-        # ROBOT honors by watching DNS. login-sentinel… distinguishes the
-        # auth/login response from the bootstrap one.
+        # Standard app keys; the MQTT endpoint handed to the app/robot is
+        # OUR broker. Mirror whichever domain family the client is
+        # actually using (DNS only overrides one of these on a given
+        # network): the real robot and the stock app see
+        # narwaltech.com, the patched test APK sees emulator.local
+        # (apk/make-custom-apk.sh) — handing back the wrong family means
+        # the client resolves the MQTT host nowhere and never reaches
+        # the local broker. (The app's MQTT client does not validate
+        # certificates, so mosquitto's single narwaltech.com-named leaf
+        # being served regardless is fine either way — only the
+        # hostname needs to resolve.)
+        host = (self.headers.get("Host") or "").split(":")[0]
+        mqtt_host = ("us-01.mqtt.emulator.local" if host.endswith(".emulator.local")
+                     else "us-01.mqtt.narwaltech.com")
         self._json({"code": 0, "msg": "ok", "success": True, "result": {
             "token": FAKE_JWT, "refresh_token": FAKE_REFRESH,
             "refreshToken": FAKE_REFRESH, "access_token": FAKE_JWT,
             "uuid": "offline-emulator-user",
-            "mqtt_host": "login-sentinel.narwal.offline",
-            "broker": "login-sentinel.narwal.offline",
-            "host": "login-sentinel.narwal.offline",
-            "mqtt": {"host": "login-sentinel.narwal.offline", "port": 1884},
-            "endpoints": {"mqtt": "login-sentinel.narwal.offline:1884"},
-            "server": "login-sentinel.narwal.offline",
-            "domain": "login-sentinel.narwal.offline"}})
+            "mqtt_host": mqtt_host,
+            "broker": mqtt_host,
+            "host": mqtt_host,
+            "mqtt": {"host": mqtt_host, "port": 8883},
+            "endpoints": {"mqtt": f"{mqtt_host}:8883"},
+            "server": mqtt_host,
+            "domain": mqtt_host}})
 
     def _devices(self):
         self._json({"code": 0, "err_code": 10000, "msg": "ok", "result": {
@@ -210,6 +221,11 @@ class SNIServer(ThreadingHTTPServer):
             leaves = os.path.join(self.pki, "leaves")
             pem = os.path.join(leaves, f"{servername}.pem")
             key = os.path.join(leaves, f"{servername}.key")
+            if not (os.path.exists(pem) and os.path.exists(key)) \
+                    and servername and servername.endswith(".emulator.local"):
+                # wildcard leaf covers every patched-app host
+                pem = os.path.join(leaves, "emulator.local.pem")
+                key = os.path.join(leaves, "emulator.local.key")
             if os.path.exists(pem) and os.path.exists(key):
                 new = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 new.load_cert_chain(pem, key)

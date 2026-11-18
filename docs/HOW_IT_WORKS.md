@@ -141,3 +141,24 @@ the Dart AOT image — a same-length binary patch, so no offsets move.
 The patched app then resolves all its hosts via your DNS to the
 emulator, and logs in against the emulator's fake tokens. Use it to
 test the emulator's app-plane before pointing a real robot at it.
+
+The string patch alone is not enough to log in. The app's
+`network_security_config` carries no `trust-anchors` override, so (per
+the stock Android default) its REST client trusts **system CAs only**
+— unlike the robot plane, which the MITM rig confirmed is lenient only
+for MQTT, not REST (`tools/mitm/README.md` in narwal-decompile). Our
+offline CA's leaf on `*.emulator.local` would be rejected and login
+would never complete. So the script also decodes `base.apk` with
+apktool (`-s`/`--no-src`, to skip smali — a full disassemble/reassemble
+of this app's dex OOMs apktool's default heap and we don't need
+source), bundles the offline CA as a raw resource, and rewrites
+`res/xml/network_security_config.xml` to trust it (plus `system`) —
+no "install this CA on your phone" step required.
+
+The emulator's `/login` response also has to hand back an MQTT host
+the *client actually has DNS for*: the robot and stock app only have
+`narwaltech.com` overridden, the patched APK only has `emulator.local`.
+`_login` mirrors the `Host` header it was called on to pick the right
+family (`us-01.mqtt.narwaltech.com` vs `us-01.mqtt.emulator.local`) —
+mosquitto itself only serves one fixed leaf regardless, which is fine
+since the app's MQTT client doesn't validate the cert anyway.
