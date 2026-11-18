@@ -122,6 +122,8 @@ class Handler(BaseHTTPRequestHandler):
             self._sweeper_device_info(host)
         elif "work-status/get" in path:
             self._work_status()
+        elif "oobe/getOobeStatus" in path:
+            self._oobe_status()
         else:
             self._json({"code": 0, "msg": "ok", "success": True, "result": {}})
 
@@ -314,6 +316,22 @@ class Handler(BaseHTTPRequestHandler):
             "is_same_site": 1, "device_site_code": site,
             "support_country_list": [site],
             "online": True, "isOnline": True, "status": 1}})
+
+    def _oobe_status(self):
+        # GetOobeStatusModel (nr_networking/network/new/model/
+        # get_oobe_status_model.dart) is just {"oobeStatus": int}.
+        # NROobeMixin.queryOobeFinished() (nr_pita_home_controller.dart)
+        # compares that int, tagged as a Dart AOT SMI (`value << 1`), to
+        # raw immediate #2 -> real value 1 means "finished". Our old
+        # generic {result:{}} catch-all parsed as oobeStatus=0 (not
+        # finished), so every single navigation into the device (room
+        # select, etc.) re-triggered the "Just a few more steps" OOBE
+        # wizard — and since the wizard's own completion write only
+        # covers the *local* isOobeFinished() flag, not whatever
+        # subsequent call the app makes afterward, finishing or
+        # cancelling it both just dumped you back at the device list.
+        self._json({"code": 0, "msg": "ok", "success": True,
+                    "result": {"oobeStatus": 1}})
 
     def _devices(self, host: str = ""):
         # deviceSiteCode has to match the account's registered country (set
