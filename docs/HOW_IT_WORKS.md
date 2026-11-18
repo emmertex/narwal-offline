@@ -121,6 +121,45 @@ the system bundle (your CA can be appended there too); the bootstrap
 and telemetry clients still reject third-party CAs — they don't matter
 for local control (bootstrap only gates first-boot provisioning).
 
+### 5a. A likely simpler path: no device write needed at all (unverified live)
+
+A third party reported (for a Freo Z, not this X Ultra, but the cloud
+stack looks shared) that the robot's MQTT client validates the
+certificate *chain* but never checks the hostname/CN the leaf was
+issued for — meaning a publicly-trusted certificate for **any** domain
+you control, served from your own broker, plus a DNS override for the
+real `narwaltech.com` hosts, is enough. No on-device file write (§2's
+exploit chain) required at all. They specifically called out ZeroSSL
+working and Let's Encrypt not working.
+
+Static analysis backs this up on two independent fronts:
+
+- The stock firmware's `/etc/ssl/certs` (extracted from the `.npkg`,
+  `robot_dump/firmware_plaintext/.../rootfs_tree/etc/ssl/certs/`) has
+  `USERTrust_RSA_Certification_Authority.crt` present as a proper
+  hash-named file (`fc5a8f99.0` — the exact chain root ZeroSSL's
+  free-tier certs use) but no `ISRG_Root_X1.crt` (Let's Encrypt's
+  actual root) — only the long-expired `DST_Root_CA_X3` cross-sign.
+  Matches the report exactly.
+- `application_node`'s imports from `libpaho-mqtt3as.so` (the Paho
+  C++ wrapper) are only `mqtt::ssl_options::set_enable_server_cert_auth`
+  and `::ca_path` (`nm -D robot_dump/binaries/application_node`) — no
+  call anywhere to a hostname/CN verification setter, even though the
+  wrapper exposes one and the underlying C library's `X509_check_host`
+  is linked into `libpaho-mqtt3as.so` itself (confirmed via `strings`,
+  `"X509_check_host for hostname %.*s failed, rc %d"`). The capability
+  exists in the library; nothing in the robot's own code turns it on.
+
+Not yet verified live (needs a real domain for ZeroSSL's ACME
+validation — ACME needs to prove domain ownership over the real
+internet, not just local DNS). If you have a domain and want to
+confirm it end-to-end: get a cert for any hostname via ZeroSSL, serve
+it as mosquitto's cert instead of the offline CA's leaf, point DNS for
+the real `*.narwaltech.com` MQTT host at your broker, and see whether
+an unmodified robot connects without ever touching its filesystem. If
+this holds, it's a meaningfully simpler and more broadly repeatable
+technique than §2's primitive, worth writing up on its own.
+
 ## 6. The firmware side (why we didn't need it)
 
 For completeness: firmware updates are `.npkg` containers — encrypted
