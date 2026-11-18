@@ -1,104 +1,98 @@
 # Do this to your own vacuum
 
-A checklist for repeating this on another Narwal robot (tested on Freo
-X Ultra / J4, fw v01.09.01.00, app 2.11.90 — other models may vary).
+Tested on Freo X Ultra / J4, fw v01.09.01.00, app 2.11.90 — other models
+may vary. Nothing here modifies firmware; everything is reversible
+(`tools/revert_to_stock.sh`).
 
 ## 0. What you need
 
-- Your Narwal **account email + password** (the app's login).
-- A LAN box that stays on (the "emulator box") with Python 3, openssl,
-  mosquitto, dnsmasq.
-- The robot on your LAN with DHCP you control (or a DNS server you can
-  point it at).
-- 30–60 minutes. Nothing here modifies firmware; everything is
-  reversible (keep the backups the tools make).
+- Your Narwal account email + password (the app's login)
+- A LAN box that stays on ("the server"; Python 3, openssl, mosquitto,
+  dnsmasq, paho-mqtt)
+- The robot on your LAN, and DNS you can point it at
+- ~30 minutes
 
-## 1. Find your identifiers
-
-```bash
-python3 tools/narwal_access.py login --email you@x.com --password '***' --region aus
-python3 tools/narwal_access.py devices
-# → note productId (EHf6cRNRGT) and deviceId (32-hex)
-```
-
-Region is one of us/eu/il/cn/aus/de (pick where your account lives;
-`aus` works for AU).
-
-## 2. Verify filesystem access
-
-```bash
-python3 tools/narwal_access.py read /etc/openwrt_release   # OS identity
-python3 tools/narwal_access.py list-files | head           # config registry
-python3 tools/narwal_access.py read /etc/passwd
-```
-
-If `read` returns data — you're in. Explore freely (robot is
-`Tina Linux`, board `mr813-ip1221*`). Useful targets:
-`/etc/ssl/certs/ca-certificates.crt`, `/robotdata/static/robot_info/*`
-(the device RSA key), `/tmp/.lastlog` (system log).
-
-## 3. Create + install your CA
+## 1. Your CA + leaves
 
 ```bash
 cd pki
-openssl req -x509 -newkey rsa:2048 -nodes -keyout offline-ca.key -out offline-ca.crt \
-  -days 7300 -subj "/CN=MyNarwalOffline" \
+openssl req -x509 -newkey rsa:2048 -nodes -keyout offline-ca.key \
+  -out offline-ca.crt -days 7300 -subj "/CN=MyNarwalOffline" \
   -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign
 ./issue-leaves.sh          # per-host leaves into pki/leaves/
 cd ..
-python3 tools/narwal_access.py install-ca pki/offline-ca.crt
 ```
 
-`install-ca` reads the bundle, appends your CA, writes it back, and
-keeps `ca-certificates.crt.bak` locally. Rollback = write the .bak back
-with the `write` command.
+Leaf gotchas (found the hard way): OpenSSL-3 clients reject leaves
+without `subjectKeyIdentifier`/`authorityKeyIdentifier` (issue-leaves.sh
+adds them); mosquitto wants its key files chowned + pid_file in /tmp.
 
-## 4. Run the emulator + broker
-
-On the emulator box (say 10.x.y.z — edit the dnsmasq snippet to match):
+## 2. Find your identifiers
 
 ```bash
-python3 emulator/emulator.py --pki pki        # :443 for every Narwal host
-mkdir -p /etc/mosquitto/narwal-offline && cp pki/leaves/us-01.mqtt* \
-  pki/leaves/eu-01.mqtt* /etc/mosquitto/narwal-offline/
-# edit emulator/mosquitto.conf paths if needed, then:
+python3 tools/narwal_access.py login --email you@x.com --password '***' --region aus
+python3 tools/narwal_access.py devices      # productId + 32-hex deviceId
+```
+
+## 3. Server side + robot onboarding
+
+```bash
+./emulator/server.sh start                   # :8081 cmd/CA server, :4550 output, :4545 shell
+SERVER=10.x.y.z ./tools/owner_setup.sh
+```
+
+The setup script: backs up the robot's `rc.local` + `sysctl.conf`
+(kept in `backups/<timestamp>/`), installs the command-channel line,
+disables IPv6 robot-side, reboots, and prints the exact follow-up
+commands. The critical one (installs the CA where the robot's MQTT
+client actually looks — an OpenSSL hash-dir entry):
+
+```bash
+./emulator/server.sh cmd \
+  'cd /etc/ssl/certs && wget -q -O <HASH>.0 http://10.x.y.z:8081/offline-ca.crt && md5sum <HASH>.0'
+```
+
+(`<HASH>` = your CA's subject hash — the setup script computes it.)
+
+**Updates off**: once DNS points at the emulator, every OTA check gets
+"no update" — that's the whole switch. (Optional hard mode: rename the
+upgrader binary via the command channel; revert before any real update.)
+
+## 4. Broker + emulator + DNS
+
+```bash
+mkdir -p /etc/mosquitto/narwal-offline && cp pki/leaves/us-01.mqtt* /etc/mosquitto/narwal-offline/
 mosquitto -c emulator/mosquitto.conf
+python3 emulator/emulator.py --pki pki        # :443 for every Narwal host
 ```
 
-Smoke-test: `openssl s_client -connect 10.x.y.z:443 -servername
-us-open.narwaltech.com -CAfile pki/offline-ca.crt` should verify.
+DNS: merge `emulator/dnsmasq-narwal.conf` (with your IP) into whatever
+the robot uses. The `local=/narwaltech.com/` line is load-bearing (and
+IPv6 is now off robot-side, so no AAAA leaks). Cycle the robot's Wi-Fi
+or reboot it; watch mosquitto's log for `New client connected … as
+sweeper_…` — that's your robot on YOUR broker.
 
-## 5. Point the robot at it (DNS)
-
-Merge `emulator/dnsmasq-narwal.conf` (with your IP) into the dnsmasq
-your robot uses for DNS, then make the robot re-lease (toggle its
-Wi-Fi via the app's network settings, or power-cycle it).
-
-What to expect today (see docs/STATUS.md): OTA-style HTTPS calls land
-on the emulator and validate fine. **The MQTT channel will reject the
-broker's cert until the itls-store blocker is solved** — during
-experiments the robot will be cloud-offline while DNS points at you;
-revert DNS to restore it (it recovers by itself).
-
-## 6. Control (once the broker is trusted)
+## 5. Control — no internet anywhere
 
 ```bash
-python3 emulator/control.py --broker 10.x.y.z --device <deviceId> status
-python3 emulator/control.py ... wake      # if docked-asleep
-python3 emulator/control.py ... start
-python3 emulator/control.py ... listen    # stream pushes
+python3 emulator/control.py --device <deviceId> status
+python3 emulator/control.py --device <deviceId> wake
+python3 emulator/control.py --device <deviceId> start
+python3 emulator/control.py --device <deviceId> listen
 ```
 
-## 7. The custom app (optional, for testing)
+(The robot drops MQTT while docked-asleep and reconnects when it wakes.)
 
-`apk/make-custom-apk.sh app.apk` → `app-offline.apk` with all hosts
-pointed at `emulator.local` (your DNS resolves it to the emulator).
-Install on a spare phone/tablet, log in with anything — the emulator
-accepts all credentials.
+## 6. The app (optional): point it at your emulator
+
+```bash
+./apk/make-custom-apk.sh /path/to/app.apkm out/
+adb install out/*.apk       # logs in with anything; talks to your emulator
+```
 
 ## Rollback (full cleanup)
 
-1. DNS: remove the narwaltech overrides.
-2. Robot CA: `write` the `.bak` bundle back (`narwal_access.py write
-   /etc/ssl/certs/ca-certificates.crt --from-file ca-certificates.crt.bak`).
-3. Nothing else persists.
+```bash
+./tools/revert_to_stock.sh            # CA entry + rc.local + IPv6 + reboot
+# then remove the DNS overrides — the robot returns to the real cloud on its own
+```

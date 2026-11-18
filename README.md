@@ -1,59 +1,62 @@
 # narwal-offline
 
-Take a Narwal Freo X Ultra (and likely other Narwal robots) off the
-cloud: an on-LAN server emulator + the access tooling to install it.
+Take YOUR Narwal Freo X Ultra off the cloud: run the cloud on your LAN.
+No firmware modification, no disassembly — everything is configuration,
+all of it reversible with one script.
 
-**Status (2026-11-17):** the file read/write primitives over MQTT work
-end-to-end; the offline CA is installed in the robot's system trust
-store; the HTTPS side of the emulator is live and the robot talks to it
-where DNS points it. **One blocker remains:** the robot's MQTT and
-device-API channels use Alibaba ID²/itls with their OWN trust store
-(they reject the system bundle), so the offline MQTT broker isn't
-accepted yet — see docs/STATUS.md. Everything else in this repo is
-ready and tested.
+**Status (2026-11-18): WORKING END-TO-END on a real robot** — the robot
+connects MQTT (TLS) to the local broker, streams telemetry, and takes
+commands via `control.py`. All research artifacts live in the
+companion repo **narwal-decompile** (exfiltrated binaries, decrypted
+firmware, keys, reversing write-ups).
 
-## Layout
+## What's here (owner kit only)
 
 | Path | What |
 |---|---|
-| `docs/HOW_IT_WORKS.md` | Full explanation of every mechanism used here |
-| `docs/OWN_VACUUM.md` | Step-by-step guide to do this to your own vacuum |
-| `docs/STATUS.md` | What works, what's blocked, what's next |
-| `tools/narwal_access.py` | Standalone read/write access (email+password → MQTT → filesystem) |
-| `emulator/emulator.py` | The offline "cloud": HTTPS SNI server for all Narwal hosts |
-| `emulator/mosquitto.conf` | Offline MQTT broker config (MQTT5 + your CA) |
-| `emulator/dnsmasq-narwal.conf` | DNS overrides (with the critical IPv6-leak fix) |
-| `emulator/control.py` | Drive the robot over MQTT (start/stop/dock/status/listen) |
-| `apk/make-custom-apk.sh` | Build a test APK whose app talks to the emulator |
-| `pki/` | Your offline CA + per-host leaf certs (`issue-leaves.sh`) |
+| `tools/owner_setup.sh` | one script → command channel + CA + IPv6-off + reboot |
+| `tools/revert_to_stock.sh` | one script → put the robot back exactly as found |
+| `tools/narwal_access.py` | MQTT login/read/write driver (the primitive) |
+| `emulator/emulator.py` | the local "cloud" (HTTPS, SNI-routed; OTA answers "no update" = updates off) |
+| `emulator/server.sh` | start/stop the server side + run shell commands on the robot |
+| `emulator/mosquitto.conf` | the local MQTT broker (MQTT5 + your CA leaf) |
+| `emulator/dnsmasq-narwal.conf` | DNS overrides (edit to your server IP) |
+| `emulator/control.py` | drive the robot offline: status / wake / start / dock / listen |
+| `apk/make-custom-apk.sh` | patch the Android app to talk to your emulator instead of the cloud |
+| `pki/` | your offline CA + per-host leaves (`issue-leaves.sh`) |
+| `docs/OWN_VACUUM.md` | the step-by-step owner guide |
+| `docs/HOW_IT_WORKS.md` | mechanisms, briefly |
 
-## Quickstart (once the MQTT trust blocker is solved)
+## Quickstart
 
 ```bash
-# 1. your CA
+# 0. your CA
 cd pki && openssl req -x509 -newkey rsa:2048 -nodes -keyout offline-ca.key \
   -out offline-ca.crt -days 7300 -subj "/CN=MyNarwalOffline" \
   -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign
-./issue-leaves.sh
+./issue-leaves.sh && cd ..
 
-# 2. install the CA on the robot (needs cloud login once)
+# 1. cloud login once (needs internet + your robot on the real cloud)
 python3 tools/narwal_access.py login --email you@x.com --password '***' --region aus
-python3 tools/narwal_access.py install-ca pki/offline-ca.crt
 
-# 3. run the emulator + broker on some LAN box (edit IPs first)
-python3 emulator/emulator.py --pki ../pki
-mosquitto -c emulator/mosquitto.conf   # after copying leaves
+# 2. server side (on the always-on box; set its IP)
+./emulator/server.sh start
+SERVER=10.x.y.z ./tools/owner_setup.sh          # → follows its own instructions
 
-# 4. point DNS at it (dnsmasq snippet), cycle the robot's Wi-Fi
+# 3. broker + emulator + DNS
+mosquitto -c emulator/mosquitto.conf            # after copying leaves
+python3 emulator/emulator.py --pki pki
+# merge emulator/dnsmasq-narwal.conf (with your IP) into the robot's DNS
 
-# 5. control — no internet anywhere
-python3 emulator/control.py status
-python3 emulator/control.py start
+# 4. control — no internet anywhere
+python3 emulator/control.py --device <deviceId> status
+
+# back to stock anytime
+./tools/revert_to_stock.sh
 ```
 
 ## Ethics / legality
 
-This is for **your own hardware**. The techniques are standard
-interoperability research (no crypto was broken; the robot's firmware
-signature chain was never attacked and modified firmware was never
-installed). Don't point any of this at vacuums you don't own.
+For **your own hardware**. Standard interoperability research — no crypto
+broken, no firmware modified, everything reversible. Don't point this at
+vacuums you don't own.
