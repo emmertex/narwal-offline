@@ -26,6 +26,8 @@ firmware, keys, reversing write-ups).
 | `pki/` | your offline CA + per-host leaves (`issue-leaves.sh`) |
 | `docs/OWN_VACUUM.md` | the step-by-step owner guide |
 | `docs/HOW_IT_WORKS.md` | mechanisms, briefly |
+| `tools/watch_ota.py` | download the firmware Narwal is currently offering your robot (needs your Narwal login) |
+| `docs/FIRMWARE_DOWNLOAD.md` | guide for you (or an AI agent) on fetching firmware to help downgrade research |
 
 ## Quickstart
 
